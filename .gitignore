@@ -1,0 +1,14 @@
+.venv
+.idea
+.env
+/data/
+/data_telega/
+/database/
+/logs/
+/backup/
+.credentials
+*.log
+*.session
+*.sql
+*.csv
+processing.lock
