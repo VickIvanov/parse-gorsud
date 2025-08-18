@@ -18,9 +18,9 @@ load_dotenv()
 # Получаем переменные окружения
 FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")  # ID каталога Yandex Cloud
 AUTH_TOKEN = os.getenv("YANDEX_AUTH_TOKEN")  # IAM-токен или API-ключ
-DATA_PATH = os.getenv("DATA_PATH", "data/2025_txt")  # Путь к папке с файлами
+DATA_PATH = os.getenv("DATA_PATH", "data/test-law-norm")  # Путь к папке с файлами
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "legal-assistant")  # Уникальное имя ассистента
-MAX_FILES = int(os.getenv("MAX_FILES", "500")) if os.getenv("MAX_FILES", "500") else None  # Максимум файлов для загрузки, если 0/None — все
+
 os.environ.pop("http_proxy", None)
 os.environ.pop("https_proxy", None)
 # ===============================
@@ -111,107 +111,135 @@ class LegalAssistant:
             return False
 
     def upload_files(self):
-        """Загружает файлы из DATA_PATH, максимум MAX_FILES (если задано), с метаданными"""
-        paths = [p for p in pathlib.Path(DATA_PATH).iterdir() if p.is_file()]
-        if MAX_FILES:
-            paths = paths[:MAX_FILES]
+        """Загружаем файлы с явным указанием MIME-типа"""
+        paths = [p for p in pathlib.Path(DATA_PATH).iterdir()
+                 if p.is_file() and p.suffix.lower() == '.txt']
+
         if not paths:
-            print("ℹ️ В папке не найдено файлов для загрузки")
+            print("ℹ️ В папке не найдено .txt файлов")
             return False
 
-        files = []
-        file_labels = [{"file": f"Файл {i+1}"} for i in range(len(paths))]
-        for i, path in enumerate(paths):
+        self.existing_files = self._get_existing_files()
+        new_files = 0
+
+        for path in paths:
+            file_name = path.name
+            file_hash = self._calculate_file_hash(path)
+
+            # Проверяем, есть ли файл среди уже загруженных и совпадает ли хеш
+            if file_name in self.existing_files:
+                existing_hash = self.existing_files[file_name]['hash']
+                print(f"📝 Отладка для {file_name}:")
+                print(f"  Существующий хеш: {existing_hash}")
+                print(f"  Новый хеш: {file_hash}")
+                if existing_hash == file_hash:
+                    print(f"⏩ Файл {file_name} уже загружен, пропускаем")
+                    if self.existing_files[file_name]['id'] not in self.current_file_ids:
+                        self.current_file_ids.append(self.existing_files[file_name]['id'])
+                    continue
+
             try:
-                print(f"⬆️ Загрузка {path.name}...", end=" ")
+                print(f"📝 Отладка для {file_name}:")
+                print(f"  Существующий хеш: {self.existing_files.get(file_name, {}).get('hash', 'отсутствует')}")
+                print(f"  Новый хеш: {file_hash}")
+                print(f"⬆️ Загрузка {file_name}...", end=' ')
                 file = self.sdk.files.upload(
                     str(path.absolute()),
-                    ttl_days=5,
-                    expiration_policy="static",
-                    name=path.name,
-                    labels=file_labels[i],
-                    mime_type="text/plain"
+                    mime_type="text/plain",
+                    description=file_hash  # Сохраняем хеш в описании файла
                 )
-                files.append(file)
+                self.current_file_ids.append(file.id)
+                self.existing_files[file_name] = {
+                    'id': file.id,
+                    'hash': file_hash
+                }
+                new_files += 1
                 print("✅ Успешно")
             except Exception as e:
                 print(f"❌ Ошибка: {str(e)}")
-        self.current_file_ids = [file.id for file in files]
-        self._uploaded_files = files
-        print(f"\nВсего файлов загружено: {len(files)}")
-        return bool(files)
+
+        print(f"\nВсего файлов: {len(self.current_file_ids)} ({new_files} новых)")
+        return bool(self.current_file_ids)
+
     def create_assistant(self):
-        """Создаёт ассистента с инструментом поиска по индексированным файлам"""
-        if not hasattr(self, "_uploaded_files") or not self._uploaded_files:
+        """Создаем нового ассистента"""
+        if not self.current_file_ids:
             print("⚠️ Нет файлов для ассистента")
             return False
+
         try:
-            from yandex_cloud_ml_sdk.search_indexes import VectorSearchIndexType
-            from yandex_cloud_ml_sdk import YCloudML
-            index_label = {
-                "legal": "Индекс содержит юридические документы"
-            }
-            print("🛠️ Создание поискового индекса...")
-            operation = self.sdk.search_indexes.create_deferred(
-                self._uploaded_files,
-                index_type=VectorSearchIndexType(),
-                name="legal-index",
-                labels=index_label,
-            )
-            search_index = operation.wait()
-            tool = self.sdk.tools.search_index(search_index)
-            print("🤖 Создание ассистента...")
+            assistants = self.sdk.assistants.list()
+            for assistant in assistants:
+                if assistant.name == ASSISTANT_NAME:
+                    print(f"ℹ️ Найден существующий ассистент: {assistant.id}")
+                    print("ℹ️ Для обновления удалите его вручную через консоль")
+                    return False
+        except Exception as e:
+            print(f"⚠️ Ошибка поиска ассистента: {str(e)}")
+
+        print("\n👨‍💼 Создание нового ассистента...")
+        try:
             assistant = self.sdk.assistants.create(
-                "yandexgpt",
-                tools=[tool]
+                name=ASSISTANT_NAME,
+                model="yandexgpt",
+                instruction="Ты — помощник по юридическим документам. Отвечай точно, используя только предоставленные файлы.",
+                file_ids=self.current_file_ids
             )
-            self._assistant = assistant
-            self._search_index = search_index
-            print(f"✅ Ассистент создан: {assistant.id}")
+            self.assistant_id = assistant.id
+            print(f"🤖 Ассистент создан: {self.assistant_id}")
             return True
         except Exception as e:
             print(f"❌ Ошибка создания ассистента: {str(e)}")
             return False
+
     def chat_loop(self):
-        """Интерактивный чат с ассистентом через консоль"""
-        if not hasattr(self, "_assistant"):
+        """Интерактивный чат с ассистентом"""
+        if not self.assistant_id:
             print("⚠️ Ассистент не создан")
             return
+
+        print("\n💬 Режим диалога. Введите 'exit' для выхода")
+
         try:
-            thread = self.sdk.threads.create()
-            input_text = input('Введите ваш вопрос ассистенту ("exit" - чтобы завершить диалог): ')
-            while input_text.lower() != "exit":
-                thread.write(input_text)
-                run = self._assistant.run(thread)
+            while True:
+                input_text = input("\nВы: ")
+                if input_text.lower() == 'exit':
+                    break
+
+                thread = self.sdk.threads.create()
+                thread.add_message(input_text)
+
+                run = thread.runs.create(assistant_id=self.assistant_id)
                 result = run.wait()
-                print(f"Ответ: {result.text}")
-                input_text = input('Введите ваш вопрос ассистенту ("exit" - чтобы завершить диалог): ')
-            print("Citations:")
-            for citation in getattr(result, "citations", []):
-                for source in citation.sources:
-                    print(f"    {source.text=}")
-                    print(f"    {source.file.name=}")
-                    print(f"        {source.file.labels=}")
-                    print(f"    {source.search_index.name=}")
-                    print(f"        {source.search_index.labels=}")
+
+                if result.last_message:
+                    print("\n🤖 Ассистент:", result.last_message.text)
+
                 thread.delete()
-        except Exception as e:
-            print(f"❌ Ошибка в чате: {str(e)}")
+
+        except KeyboardInterrupt:
+            print("\nЗавершение работы...")
+
     def run(self):
-        def run(self):
-            """Основной цикл работы: загрузка файлов, создание ассистента, чат"""
+        """Основной цикл работы"""
+        # Проверяем наличие обязательных переменных окружения
         if not FOLDER_ID:
             print("❌ Ошибка: Не указан YANDEX_FOLDER_ID в .env файле")
             return
+
         if not AUTH_TOKEN:
             print("❌ Ошибка: Не указан YANDEX_AUTH_TOKEN в .env файле")
             return
+
         if not self.upload_files():
             return
+
         if not self.create_assistant():
             return
+
         self.chat_loop()
         print("\n🏁 Работа завершена")
+
 if __name__ == "__main__":
     assistant = LegalAssistant()
-    assistant.run()
+    assistant.delete_all_cloud_files()

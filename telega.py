@@ -20,6 +20,9 @@ class Config:
     SESSION_FILE = "safe_session"
     CHUNK_SIZE = 100  # Сообщений за один запрос
     DELAY = 1  # Задержка между запросами (секунды)
+    LOGS_DIR = "logs/telega"
+    MESSAGE_DELAY = 3
+
 
 # Отключаем прокси из переменных окружения
 for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
